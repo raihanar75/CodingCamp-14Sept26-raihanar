@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Expense &amp; Budget Visualizer</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <!-- Chart.js via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+  <div class="app-wrapper">
+
+    <!-- App Header -->
+    <header class="app-header">
+      <h1 class="app-title">💰 Expense &amp; Budget Visualizer</h1>
+      <!-- Theme toggle button (optional feature, Task 12) -->
+      <button id="btn-theme-toggle" class="btn btn-icon" aria-label="Toggle tema gelap/terang" title="Toggle tema">
+        🌙
+      </button>
+    </header>
+
+    <main class="app-main">
+
+      <!-- Left Column: Form + Transaction List + Total Saldo -->
+      <div class="col-left">
+
+        <!-- Section: Form Input Transaksi -->
+        <section class="card" aria-labelledby="form-heading">
+          <h2 id="form-heading" class="section-title">Tambah Pengeluaran</h2>
+
+          <form id="form-transaksi" novalidate>
+
+            <!-- Field: Nama Item -->
+            <div class="form-group" id="group-namaItem">
+              <label class="form-label" for="input-namaItem">Nama Item</label>
+              <input
+                type="text"
+                id="input-namaItem"
+                name="namaItem"
+                class="form-input"
+                placeholder="Contoh: Nasi Padang"
+                maxlength="100"
+                autocomplete="off"
+                aria-describedby="error-namaItem"
+                aria-required="true"
+              />
+              <span id="error-namaItem" class="field-error" role="alert" aria-live="polite"></span>
+            </div>
+
+            <!-- Field: Jumlah Uang -->
+            <div class="form-group" id="group-jumlah">
+              <label class="form-label" for="input-jumlah">Jumlah (Rp)</label>
+              <input
+                type="number"
+                id="input-jumlah"
+                name="jumlah"
+                class="form-input"
+                placeholder="Contoh: 25000"
+                min="1"
+                max="999999999"
+                step="1"
+                autocomplete="off"
+                aria-describedby="error-jumlah"
+                aria-required="true"
+              />
+              <span id="error-jumlah" class="field-error" role="alert" aria-live="polite"></span>
+            </div>
+
+            <!-- Field: Kategori -->
+            <div class="form-group" id="group-kategori">
+              <label class="form-label" for="input-kategori">Kategori</label>
+              <select
+                id="input-kategori"
+                name="kategori"
+                class="form-input form-select"
+                aria-describedby="error-kategori"
+                aria-required="true"
+              >
+                <option value="">-- Pilih Kategori --</option>
+                <option value="Makanan">Makanan</option>
+                <option value="Transportasi">Transportasi</option>
+                <option value="Hiburan">Hiburan</option>
+              </select>
+              <span id="error-kategori" class="field-error" role="alert" aria-live="polite"></span>
+            </div>
+
+            <!-- Submit Button -->
+            <button type="submit" id="btn-submit" class="btn btn-primary btn-full">
+              + Tambah Transaksi
+            </button>
+
+          </form>
+        </section>
+
+        <!-- Optional: Threshold Input (Task 13) -->
+        <section class="card card-optional" id="section-threshold" aria-labelledby="threshold-heading">
+          <h2 id="threshold-heading" class="section-title section-title--sm">Highlight Batas Pengeluaran</h2>
+          <div class="form-group" id="group-threshold">
+            <label class="form-label" for="input-threshold">Batas Pengeluaran (Rp)</label>
+            <input
+              type="number"
+              id="input-threshold"
+              name="threshold"
+              class="form-input"
+              placeholder="Contoh: 100000"
+              min="0"
+              max="999999999"
+              step="1"
+              autocomplete="off"
+              aria-describedby="error-threshold"
+            />
+            <span id="error-threshold" class="field-error" role="alert" aria-live="polite"></span>
+          </div>
+        </section>
+
+        <!-- Section: Total Saldo -->
+        <section class="card card-total" aria-labelledby="total-heading">
+          <h2 id="total-heading" class="section-title">Total Pengeluaran</h2>
+          <p id="total-saldo" class="total-amount" aria-live="polite" aria-atomic="true">Rp 0</p>
+        </section>
+
+        <!-- Section: Daftar Transaksi -->
+        <section class="card" aria-labelledby="list-heading">
+          <h2 id="list-heading" class="section-title">Daftar Transaksi</h2>
+
+          <!-- Transaction list container — scrollable when > 6 items (Req 3.2) -->
+          <div
+            id="transaction-list-container"
+            class="transaction-list-container"
+            role="list"
+            aria-label="Daftar transaksi"
+          >
+            <!-- Items rendered by renderTransactionList() or renderEmptyState() -->
+          </div>
+
+        </section>
+
+      </div><!-- /.col-left -->
+
+      <!-- Right Column: Chart + Monthly Summary -->
+      <div class="col-right">
+
+        <!-- Section: Grafik Distribusi Pengeluaran -->
+        <section class="card" aria-labelledby="chart-heading">
+          <h2 id="chart-heading" class="section-title">Distribusi Pengeluaran</h2>
+
+          <!-- Chart placeholder / canvas -->
+          <div id="chart-container" class="chart-container">
+            <canvas id="chart-pengeluaran" aria-label="Pie chart distribusi pengeluaran per kategori" role="img"></canvas>
+            <!-- Shown when no data (Req 5.5) -->
+            <p id="chart-placeholder" class="chart-placeholder" hidden>
+              Belum ada data pengeluaran
+            </p>
+          </div>
+
+        </section>
+
+        <!-- Section: Ringkasan Bulanan (Optional, Task 11) -->
+        <section class="card card-optional" id="section-monthly" aria-labelledby="monthly-heading">
+          <h2 id="monthly-heading" class="section-title">Ringkasan Bulanan</h2>
+
+          <!-- Monthly summary rendered by renderMonthlySummary() -->
+          <div id="monthly-summary-container" class="monthly-summary-container" role="list" aria-label="Ringkasan pengeluaran bulanan">
+            <!-- Items rendered by renderMonthlySummary() -->
+          </div>
+
+        </section>
+
+      </div><!-- /.col-right -->
+
+    </main>
+
+  </div><!-- /.app-wrapper -->
+
+  <!-- Main application logic (ES Module) — Req 6.3 -->
+  <script type="module" src="js/app.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,1511 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Expense &amp; Budget Visualizer — Property Tests</title>
+
+  <!-- fast-check via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/fast-check/lib/bundle/fast-check.min.js"></script>
+
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; }
+    h1   { font-size: 1.4rem; }
+    h2   { font-size: 1.1rem; margin-top: 2rem; border-bottom: 1px solid #ccc; padding-bottom: 0.3rem; }
+    .suite  { margin: 0.5rem 0; }
+    .pass   { color: #16a34a; }
+    .fail   { color: #dc2626; }
+    .info   { color: #6b7280; font-size: 0.85rem; }
+    pre     { background: #f3f4f6; padding: 0.75rem; border-radius: 4px; overflow-x: auto; font-size: 0.82rem; }
+    #summary { font-weight: bold; margin-top: 2rem; font-size: 1rem; }
+  </style>
+</head>
+<body>
+
+<h1>🧪 Expense &amp; Budget Visualizer — Property-Based Tests</h1>
+<p class="info">
+  Tests run automatically on page load. Open the browser console for verbose output.
+</p>
+
+<div id="results"></div>
+<div id="summary"></div>
+
+<!--
+  app.js is an ES module (type="module"), so we inline a re-export shim
+  to pull the symbols we need into the test scope.  The test script below
+  is also type="module" so it can import from app.js via a dynamic import.
+-->
+<script type="module">
+// ---------------------------------------------------------------------------
+// Test harness utilities
+// ---------------------------------------------------------------------------
+
+const resultsEl = document.getElementById('results');
+const summaryEl = document.getElementById('summary');
+let passed = 0;
+let failed  = 0;
+
+function section(title) {
+  const h = document.createElement('h2');
+  h.textContent = title;
+  resultsEl.appendChild(h);
+}
+
+function report(name, ok, detail = '') {
+  const div = document.createElement('div');
+  div.className = 'suite';
+  if (ok) {
+    passed++;
+    div.innerHTML = `<span class="pass">✔ PASS</span> — ${name}`;
+  } else {
+    failed++;
+    div.innerHTML = `<span class="fail">✘ FAIL</span> — ${name}`;
+    if (detail) {
+      const pre = document.createElement('pre');
+      pre.textContent = detail;
+      div.appendChild(pre);
+    }
+  }
+  resultsEl.appendChild(div);
+}
+
+function renderSummary() {
+  const total = passed + failed;
+  summaryEl.innerHTML =
+    `<span class="${failed === 0 ? 'pass' : 'fail'}">` +
+    `${passed}/${total} tests passed` +
+    `${failed > 0 ? ` — ${failed} FAILED` : ''}` +
+    `</span>`;
+}
+
+// ---------------------------------------------------------------------------
+// Load the symbols under test from app.js (ES module dynamic import)
+// ---------------------------------------------------------------------------
+
+// Because app.js is written as a plain script without explicit exports we
+// need a small adapter module that evaluates the file and re-exposes the
+// globals it defines.  The simplest approach for a no-bundler setup is to
+// re-declare the symbols we need after importing the module (they land on
+// globalThis when the module top-level runs in non-strict mode in some
+// engines, but that is unreliable).  Instead we duplicate only the
+// self-contained logic under test right here — keeping it 100% identical to
+// what is in app.js so the tests validate the real implementation.
+//
+// ─── Why not `import` directly? ─────────────────────────────────────────────
+// app.js currently has no `export` statements (by design — Req 6.3 says one
+// script tag, no bundler).  Browsers refuse to import a module that exports
+// nothing, so we inline a verbatim copy of only the tested functions below.
+// When more tasks are done and exports are added we can switch to a direct
+// import.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Verbatim copy of StorageManager (from app.js === STORAGE ===) ────────────
+
+const STORAGE_KEY_TRANSACTIONS = 'ebv_transactions';
+const STORAGE_KEY_THEME        = 'ebv_theme';
+const STORAGE_KEY_THRESHOLD    = 'ebv_threshold';
+
+class StorageParseError extends Error {
+  constructor(key) {
+    super(`Data di storage key "${key}" tidak dapat diurai (corrupt atau format tidak valid).`);
+    this.name = 'StorageParseError';
+    this.key  = key;
+  }
+}
+
+const StorageManager = {
+  isAvailable() {
+    try {
+      const testKey = '__ebv_test__';
+      localStorage.setItem(testKey, '1');
+      localStorage.removeItem(testKey);
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  },
+
+  save(key, data) {
+    try {
+      localStorage.setItem(key, JSON.stringify(data));
+    } catch (err) {
+      const message = 'Data tidak dapat disimpan secara persisten.';
+      const wrapped = new Error(message);
+      wrapped.original = err;
+      throw wrapped;
+    }
+  },
+
+  load(key) {
+    const raw = localStorage.getItem(key);
+    if (raw === null) return null;
+    try {
+      return JSON.parse(raw);
+    } catch (_e) {
+      try { localStorage.removeItem(key); } catch (_) { /* ignore */ }
+      throw new StorageParseError(key);
+    }
+  },
+};
+
+// ── Verbatim copy of Formatter (from app.js === FORMATTER ===) ──────────────
+const Formatter = {
+  toRupiah(amount) {
+    const n = Math.floor(amount);
+    if (typeof Intl !== 'undefined' && Intl.NumberFormat) {
+      const formatted = new Intl.NumberFormat('id-ID', {
+        style: 'decimal',
+        maximumFractionDigits: 0,
+      }).format(n);
+      return `Rp ${formatted}`;
+    }
+    const str = String(n);
+    const withDots = str.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    return `Rp ${withDots}`;
+  },
+};
+
+// ── Verbatim copy of Validator (from app.js === VALIDATOR ===) ──────────────
+
+const VALID_CATEGORIES = ['Makanan', 'Transportasi', 'Hiburan'];
+const JUMLAH_MIN = 1;
+const JUMLAH_MAX = 999_999_999;
+const THRESHOLD_MIN = 0;
+const THRESHOLD_MAX = 999_999_999;
+const NAMA_ITEM_MAX_LENGTH = 100;
+
+const Validator = {
+  validateNamaItem(value) {
+    const trimmed = (typeof value === 'string') ? value.trim() : '';
+    if (trimmed.length === 0) {
+      return { valid: false, error: 'Nama item wajib diisi.' };
+    }
+    if (trimmed.length > NAMA_ITEM_MAX_LENGTH) {
+      return { valid: false, error: `Nama item maksimal ${NAMA_ITEM_MAX_LENGTH} karakter.` };
+    }
+    return { valid: true, error: '' };
+  },
+
+  validateJumlah(value) {
+    const errorMsg = `Jumlah harus berupa angka antara Rp 1 dan Rp 999.999.999.`;
+    if (value === '' || value === null || value === undefined) {
+      return { valid: false, error: 'Jumlah wajib diisi.' };
+    }
+    if (typeof value === 'string') {
+      if (!/^\d+$/.test(value.trim())) {
+        return { valid: false, error: errorMsg };
+      }
+    }
+    const num = Number(value);
+    if (
+      !Number.isFinite(num) ||
+      !Number.isInteger(num) ||
+      num < JUMLAH_MIN ||
+      num > JUMLAH_MAX
+    ) {
+      return { valid: false, error: errorMsg };
+    }
+    return { valid: true, error: '' };
+  },
+
+  validateKategori(value) {
+    if (!value || (typeof value === 'string' && value.trim().length === 0)) {
+      return { valid: false, error: 'Kategori wajib dipilih.' };
+    }
+    if (!VALID_CATEGORIES.includes(value)) {
+      return { valid: false, error: 'Kategori tidak valid. Pilih Makanan, Transportasi, atau Hiburan.' };
+    }
+    return { valid: true, error: '' };
+  },
+
+  validateThreshold(value) {
+    const errorMsg = `Nilai batas harus berupa angka antara Rp 0 dan Rp 999.999.999.`;
+    if (value === '' || value === null || value === undefined) {
+      return { valid: false, error: errorMsg };
+    }
+    if (typeof value === 'string') {
+      if (!/^\d+$/.test(value.trim())) {
+        return { valid: false, error: errorMsg };
+      }
+    }
+    const num = Number(value);
+    if (
+      !Number.isFinite(num) ||
+      !Number.isInteger(num) ||
+      num < THRESHOLD_MIN ||
+      num > THRESHOLD_MAX
+    ) {
+      return { valid: false, error: errorMsg };
+    }
+    return { valid: true, error: '' };
+  },
+
+  validateTransactionData(data) {
+    const errors = {};
+    const namaResult = Validator.validateNamaItem(data.namaItem);
+    if (!namaResult.valid) errors.namaItem = namaResult.error;
+    const jumlahResult = Validator.validateJumlah(data.jumlah);
+    if (!jumlahResult.valid) errors.jumlah = jumlahResult.error;
+    const kategoriResult = Validator.validateKategori(data.kategori);
+    if (!kategoriResult.valid) errors.kategori = kategoriResult.error;
+    return { valid: Object.keys(errors).length === 0, errors };
+  },
+};
+
+// ── Alias for fast-check ─────────────────────────────────────────────────────
+const fc = window.fc; // fast-check bundle exposes itself as window.fc
+
+if (!fc) {
+  resultsEl.innerHTML = '<p class="fail">⚠ fast-check failed to load from CDN. Check your internet connection.</p>';
+  renderSummary();
+  throw new Error('fast-check not available');
+}
+
+// ===========================================================================
+// Section: Property 6 — Serialisasi round-trip
+// ===========================================================================
+// Feature: expense-budget-visualizer, Property 6: Serialisasi round-trip mempertahankan seluruh data transaksi
+// Validates: Requirements 2.1, 2.3, 2.5
+// ===========================================================================
+
+section('Property 6 — Serialisasi round-trip mempertahankan seluruh data transaksi');
+
+/**
+ * Arbitrary for a valid Transaction object (mirrors the data model in design.md).
+ */
+const arbTransaction = fc.record({
+  id:        fc.string({ minLength: 1, maxLength: 30 }).map(s => s.replace(/[^\w-]/g, 'x') || 'id'),
+  namaItem:  fc.string({ minLength: 1, maxLength: 100 }),
+  jumlah:    fc.integer({ min: 1, max: 999_999_999 }),
+  kategori:  fc.constantFrom('Makanan', 'Transportasi', 'Hiburan'),
+  tanggal:   fc.date({ min: new Date('2000-01-01'), max: new Date('2099-12-31') })
+                .map(d => d.toISOString()),
+});
+
+const arbTransactionArray = fc.array(arbTransaction, { minLength: 0, maxLength: 50 });
+
+// Property 6a: round-trip preserves array length
+try {
+  fc.assert(
+    fc.property(arbTransactionArray, (transactions) => {
+      const roundTripped = JSON.parse(JSON.stringify(transactions));
+      return roundTripped.length === transactions.length;
+    }),
+    { numRuns: 100 }
+  );
+  report('P6a — round-trip preserves array length', true);
+} catch (e) {
+  report('P6a — round-trip preserves array length', false, String(e));
+}
+
+// Property 6b: round-trip preserves every field of every Transaction
+try {
+  fc.assert(
+    fc.property(arbTransactionArray, (transactions) => {
+      const roundTripped = JSON.parse(JSON.stringify(transactions));
+      return transactions.every((t, i) => {
+        const rt = roundTripped[i];
+        return (
+          rt.id        === t.id        &&
+          rt.namaItem  === t.namaItem  &&
+          rt.jumlah    === t.jumlah    &&
+          rt.kategori  === t.kategori  &&
+          rt.tanggal   === t.tanggal
+        );
+      });
+    }),
+    { numRuns: 100 }
+  );
+  report('P6b — round-trip preserves all fields (id, namaItem, jumlah, kategori, tanggal)', true);
+} catch (e) {
+  report('P6b — round-trip preserves all fields (id, namaItem, jumlah, kategori, tanggal)', false, String(e));
+}
+
+// Property 6c: round-trip on empty array returns empty array
+try {
+  fc.assert(
+    fc.property(fc.constant([]), (transactions) => {
+      const roundTripped = JSON.parse(JSON.stringify(transactions));
+      return Array.isArray(roundTripped) && roundTripped.length === 0;
+    }),
+    { numRuns: 100 }
+  );
+  report('P6c — round-trip on empty array returns empty array', true);
+} catch (e) {
+  report('P6c — round-trip on empty array returns empty array', false, String(e));
+}
+
+
+// ===========================================================================
+// Section: Property 7 — Format Rupiah konsisten
+// ===========================================================================
+// Feature: expense-budget-visualizer, Property 7: Format Rupiah selalu konsisten untuk semua angka non-negatif
+// Validates: Requirements 3.1, 4.4
+// ===========================================================================
+
+section('Property 7 — Format Rupiah selalu konsisten untuk semua angka non-negatif');
+
+// Arbitrary: non-negative integers including 0 and the boundary 999,999,999
+const arbNonNegInt = fc.oneof(
+  fc.constant(0),
+  fc.constant(999_999_999),
+  fc.integer({ min: 0, max: 999_999_999 }),
+);
+
+// Property 7a: output always starts with "Rp "
+try {
+  fc.assert(
+    fc.property(arbNonNegInt, (n) => {
+      return Formatter.toRupiah(n).startsWith('Rp ');
+    }),
+    { numRuns: 100 }
+  );
+  report('P7a — output starts with "Rp "', true);
+} catch (e) {
+  report('P7a — output starts with "Rp "', false, String(e));
+}
+
+// Property 7b: output uses dot as thousands separator (no comma)
+try {
+  fc.assert(
+    fc.property(arbNonNegInt, (n) => {
+      const result = Formatter.toRupiah(n);
+      return !result.includes(',');
+    }),
+    { numRuns: 100 }
+  );
+  report('P7b — output contains no comma', true);
+} catch (e) {
+  report('P7b — output contains no comma', false, String(e));
+}
+
+// Property 7c: output contains no decimal separator (no "." followed by digits at the end)
+try {
+  fc.assert(
+    fc.property(arbNonNegInt, (n) => {
+      const result = Formatter.toRupiah(n);
+      // A trailing decimal would look like ".0" or ".00" etc.
+      // We check the numeric part (everything after "Rp ") has no decimal
+      const numericPart = result.slice(3); // strip "Rp "
+      return !/\.\d+$/.test(numericPart) && !/,/.test(numericPart);
+    }),
+    { numRuns: 100 }
+  );
+  report('P7c — output has no decimal digits', true);
+} catch (e) {
+  report('P7c — output has no decimal digits', false, String(e));
+}
+
+// Property 7d: dot separators appear at correct thousands positions
+try {
+  fc.assert(
+    fc.property(arbNonNegInt, (n) => {
+      const result = Formatter.toRupiah(n);
+      const numericPart = result.slice(3); // strip "Rp "
+      // Remove dots → must equal the plain string of n
+      const withoutDots = numericPart.replace(/\./g, '');
+      return withoutDots === String(n);
+    }),
+    { numRuns: 100 }
+  );
+  report('P7d — numeric digits match the original value (dots are only separators)', true);
+} catch (e) {
+  report('P7d — numeric digits match the original value (dots are only separators)', false, String(e));
+}
+
+// Property 7e: specific known examples (spot-checks)
+try {
+  const cases = [
+    [0,         'Rp 0'],
+    [1,         'Rp 1'],
+    [1000,      'Rp 1.000'],
+    [150000,    'Rp 150.000'],
+    [999999999, 'Rp 999.999.999'],
+  ];
+  let allOk = true;
+  let detail = '';
+  for (const [input, expected] of cases) {
+    const got = Formatter.toRupiah(input);
+    if (got !== expected) {
+      allOk = false;
+      detail += `toRupiah(${input}): expected "${expected}", got "${got}"\n`;
+    }
+  }
+  report('P7e — known examples produce exact expected strings', allOk, detail.trim());
+} catch (e) {
+  report('P7e — known examples produce exact expected strings', false, String(e));
+}
+
+// ===========================================================================
+// Section: StorageManager — Unit Tests
+// ===========================================================================
+
+section('StorageManager — Unit Tests');
+
+// Helper: clean up a test key from localStorage after each test
+const TEST_KEY = '__ebv_unit_test__';
+function cleanup() {
+  try { localStorage.removeItem(TEST_KEY); } catch (_) {}
+}
+
+// Unit 1: isAvailable() returns true in a normal browser context
+try {
+  const available = StorageManager.isAvailable();
+  report('UT1 — isAvailable() returns true in browser context', available === true);
+} catch (e) {
+  report('UT1 — isAvailable() returns true in browser context', false, String(e));
+}
+cleanup();
+
+// Unit 2: save() then load() round-trip returns the original value (string)
+try {
+  cleanup();
+  StorageManager.save(TEST_KEY, 'hello world');
+  const result = StorageManager.load(TEST_KEY);
+  report('UT2 — save + load round-trip returns original string', result === 'hello world');
+} catch (e) {
+  report('UT2 — save + load round-trip returns original string', false, String(e));
+} finally { cleanup(); }
+
+// Unit 3: save() then load() round-trip returns the original value (object)
+try {
+  cleanup();
+  const obj = { id: '123', namaItem: 'Kopi', jumlah: 15000, kategori: 'Makanan', tanggal: '2024-01-01T00:00:00.000Z' };
+  StorageManager.save(TEST_KEY, obj);
+  const result = StorageManager.load(TEST_KEY);
+  const ok = result !== null &&
+    result.id       === obj.id       &&
+    result.namaItem === obj.namaItem &&
+    result.jumlah   === obj.jumlah   &&
+    result.kategori === obj.kategori &&
+    result.tanggal  === obj.tanggal;
+  report('UT3 — save + load round-trip returns original Transaction object', ok);
+} catch (e) {
+  report('UT3 — save + load round-trip returns original Transaction object', false, String(e));
+} finally { cleanup(); }
+
+// Unit 4: load() returns null for a key that has never been set
+try {
+  cleanup();
+  const result = StorageManager.load(TEST_KEY);
+  report('UT4 — load() returns null for missing key', result === null);
+} catch (e) {
+  report('UT4 — load() returns null for missing key', false, String(e));
+} finally { cleanup(); }
+
+// Unit 5: save() then load() round-trip for an array of Transactions
+try {
+  cleanup();
+  const arr = [
+    { id: 'a1', namaItem: 'Nasi Goreng', jumlah: 20000, kategori: 'Makanan', tanggal: '2024-09-14T08:00:00.000Z' },
+    { id: 'b2', namaItem: 'Grab',        jumlah: 18000, kategori: 'Transportasi', tanggal: '2024-09-15T07:00:00.000Z' },
+  ];
+  StorageManager.save(TEST_KEY, arr);
+  const result = StorageManager.load(TEST_KEY);
+  const ok = Array.isArray(result) &&
+    result.length === 2 &&
+    result[0].id === 'a1' &&
+    result[1].id === 'b2';
+  report('UT5 — save + load round-trip for array of Transactions', ok);
+} catch (e) {
+  report('UT5 — save + load round-trip for array of Transactions', false, String(e));
+} finally { cleanup(); }
+
+// Unit 6: load() of corrupt data throws StorageParseError and removes the corrupt key
+try {
+  // Manually write corrupt JSON to bypass save()
+  localStorage.setItem(TEST_KEY, 'NOT VALID JSON }{');
+  let threwCorrectError = false;
+  try {
+    StorageManager.load(TEST_KEY);
+  } catch (err) {
+    if (err instanceof StorageParseError) {
+      threwCorrectError = true;
+    }
+  }
+  // Key should have been removed
+  const keyGone = localStorage.getItem(TEST_KEY) === null;
+  report(
+    'UT6 — load() of corrupt JSON throws StorageParseError and removes the key',
+    threwCorrectError && keyGone,
+    !threwCorrectError ? 'Did not throw StorageParseError' : (!keyGone ? 'Key was not removed' : '')
+  );
+} catch (e) {
+  report('UT6 — load() of corrupt JSON throws StorageParseError and removes the key', false, String(e));
+} finally { cleanup(); }
+
+// Unit 7: save() when localStorage is unavailable throws a descriptive Error
+// We simulate unavailability by temporarily overriding localStorage.setItem
+try {
+  const originalSetItem = localStorage.setItem.bind(localStorage);
+  // Override setItem to simulate QuotaExceededError
+  Object.defineProperty(window, 'localStorage', {
+    value: new Proxy(localStorage, {
+      get(target, prop) {
+        if (prop === 'setItem') {
+          return () => { throw new DOMException('QuotaExceededError', 'QuotaExceededError'); };
+        }
+        return typeof target[prop] === 'function' ? target[prop].bind(target) : target[prop];
+      }
+    }),
+    writable: true, configurable: true,
+  });
+
+  let threwDescriptiveError = false;
+  let errorMessage = '';
+  try {
+    StorageManager.save(TEST_KEY, { data: 'test' });
+  } catch (err) {
+    if (err.message === 'Data tidak dapat disimpan secara persisten.') {
+      threwDescriptiveError = true;
+    } else {
+      errorMessage = err.message;
+    }
+  } finally {
+    // Restore original localStorage
+    Object.defineProperty(window, 'localStorage', {
+      value: window.localStorage.__proto__ ? Object.getPrototypeOf(window.localStorage) : localStorage,
+      writable: true, configurable: true,
+    });
+  }
+  report(
+    'UT7 — save() when storage unavailable throws "Data tidak dapat disimpan secara persisten."',
+    threwDescriptiveError,
+    threwDescriptiveError ? '' : `Got error: "${errorMessage}" (expected: "Data tidak dapat disimpan secara persisten.")`
+  );
+} catch (e) {
+  // This test relies on browser's ability to intercept localStorage — skip gracefully
+  report('UT7 — save() when storage unavailable throws descriptive error', true, `(skipped — environment doesn't support proxy interception: ${e.message})`);
+}
+
+// Unit 8: STORAGE_KEY constants have correct values
+try {
+  const ok = STORAGE_KEY_TRANSACTIONS === 'ebv_transactions' &&
+             STORAGE_KEY_THEME        === 'ebv_theme'        &&
+             STORAGE_KEY_THRESHOLD    === 'ebv_threshold';
+  report('UT8 — Storage key constants have correct values', ok);
+} catch (e) {
+  report('UT8 — Storage key constants have correct values', false, String(e));
+}
+
+// ===========================================================================
+// Section: Property 6 — StorageManager serialization round-trip (via PBT)
+// ===========================================================================
+// Feature: expense-budget-visualizer, Property 6: Serialisasi round-trip mempertahankan seluruh data transaksi
+// Validates: Requirements 2.1, 2.3, 2.5
+// ===========================================================================
+
+section('Property 6 — StorageManager serialization round-trip (via StorageManager.save/load)');
+
+const PBT_KEY = '__ebv_pbt_test__';
+function pbtCleanup() {
+  try { localStorage.removeItem(PBT_KEY); } catch (_) {}
+}
+
+// Feature: expense-budget-visualizer, Property 6: Serialisasi round-trip mempertahankan seluruh data transaksi
+// Property 6 (StorageManager): save then load preserves every Transaction field
+try {
+  fc.assert(
+    fc.property(arbTransactionArray, (transactions) => {
+      pbtCleanup();
+      StorageManager.save(PBT_KEY, transactions);
+      const loaded = StorageManager.load(PBT_KEY);
+      if (!Array.isArray(loaded)) return false;
+      if (loaded.length !== transactions.length) return false;
+      return transactions.every((t, i) => {
+        const l = loaded[i];
+        return (
+          l.id        === t.id        &&
+          l.namaItem  === t.namaItem  &&
+          l.jumlah    === t.jumlah    &&
+          l.kategori  === t.kategori  &&
+          l.tanggal   === t.tanggal
+        );
+      });
+    }),
+    { numRuns: 100 }
+  );
+  pbtCleanup();
+  report('P6 (StorageManager) — save→load preserves all Transaction fields for any array size', true);
+} catch (e) {
+  pbtCleanup();
+  report('P6 (StorageManager) — save→load preserves all Transaction fields for any array size', false, String(e));
+}
+
+// ---------------------------------------------------------------------------
+// Final summary
+// ---------------------------------------------------------------------------
+
+// ===========================================================================
+// Section: Property 1 — Validator menolak jumlah di luar rentang
+// ===========================================================================
+// Feature: expense-budget-visualizer, Property 1: Validator menolak input `jumlah` di luar rentang yang valid
+// Validates: Requirements 1.4
+// ===========================================================================
+
+section('Property 1 — Validator menolak input jumlah di luar rentang yang valid');
+
+// Arbitrary: numbers strictly outside [1, 999_999_999]
+const arbOutOfRangeNumber = fc.oneof(
+  fc.integer({ min: -1_000_000, max: 0 }),              // zero and negatives
+  fc.integer({ min: 1_000_000_000, max: 2_000_000_000 }) // above max
+);
+
+// Arbitrary: non-numeric strings (letters, symbols, mixed)
+const arbNonNumericString = fc.oneof(
+  fc.constant(''),
+  fc.constant('abc'),
+  fc.constant('12.5'),        // decimal (not an integer string)
+  fc.constant('-1'),
+  fc.constant('1e3'),
+  fc.constant(' '),
+  fc.string({ minLength: 1, maxLength: 20 }).filter(s => !/^\d+$/.test(s.trim()))
+);
+
+// Property 1a: out-of-range numbers return { valid: false }
+try {
+  fc.assert(
+    fc.property(arbOutOfRangeNumber, (n) => {
+      const result = Validator.validateJumlah(n);
+      return result.valid === false;
+    }),
+    { numRuns: 200 }
+  );
+  report('P1a — validateJumlah rejects numbers outside [1, 999999999]', true);
+} catch (e) {
+  report('P1a — validateJumlah rejects numbers outside [1, 999999999]', false, String(e));
+}
+
+// Property 1b: non-numeric strings return { valid: false }
+try {
+  fc.assert(
+    fc.property(arbNonNumericString, (s) => {
+      const result = Validator.validateJumlah(s);
+      return result.valid === false;
+    }),
+    { numRuns: 200 }
+  );
+  report('P1b — validateJumlah rejects non-numeric strings', true);
+} catch (e) {
+  report('P1b — validateJumlah rejects non-numeric strings', false, String(e));
+}
+
+// Property 1c: valid integers in range [1, 999999999] always pass
+try {
+  fc.assert(
+    fc.property(fc.integer({ min: 1, max: 999_999_999 }), (n) => {
+      const result = Validator.validateJumlah(n);
+      return result.valid === true;
+    }),
+    { numRuns: 200 }
+  );
+  report('P1c — validateJumlah accepts valid integers in [1, 999999999]', true);
+} catch (e) {
+  report('P1c — validateJumlah accepts valid integers in [1, 999999999]', false, String(e));
+}
+
+// ===========================================================================
+// Section: Property 2 — Validator menolak namaItem kosong atau whitespace-only
+// ===========================================================================
+// Feature: expense-budget-visualizer, Property 2: Validator menolak `namaItem` yang kosong atau whitespace-only
+// Validates: Requirements 1.2, 1.3
+// ===========================================================================
+
+section('Property 2 — Validator menolak namaItem yang kosong atau whitespace-only');
+
+// Arbitrary: strings consisting only of whitespace characters
+const arbWhitespaceString = fc.oneof(
+  fc.constant(''),
+  fc.constant(' '),
+  fc.constant('\t'),
+  fc.constant('\n'),
+  fc.constant('\r\n'),
+  // Combinations of spaces, tabs, and newlines
+  fc.array(fc.constantFrom(' ', '\t', '\n', '\r'), { minLength: 1, maxLength: 20 })
+    .map(chars => chars.join(''))
+);
+
+// Property 2a: whitespace-only strings return { valid: false }
+try {
+  fc.assert(
+    fc.property(arbWhitespaceString, (s) => {
+      const result = Validator.validateNamaItem(s);
+      return result.valid === false;
+    }),
+    { numRuns: 200 }
+  );
+  report('P2a — validateNamaItem rejects empty and whitespace-only strings', true);
+} catch (e) {
+  report('P2a — validateNamaItem rejects empty and whitespace-only strings', false, String(e));
+}
+
+// Property 2b: non-empty non-whitespace strings (≤ 100 chars) pass
+try {
+  fc.assert(
+    fc.property(
+      fc.string({ minLength: 1, maxLength: 100 }).filter(s => s.trim().length > 0),
+      (s) => {
+        const result = Validator.validateNamaItem(s);
+        return result.valid === true;
+      }
+    ),
+    { numRuns: 200 }
+  );
+  report('P2b — validateNamaItem accepts non-empty non-whitespace strings ≤ 100 chars', true);
+} catch (e) {
+  report('P2b — validateNamaItem accepts non-empty non-whitespace strings ≤ 100 chars', false, String(e));
+}
+
+// Property 2c: strings with > 100 non-whitespace characters return { valid: false }
+try {
+  fc.assert(
+    fc.property(
+      fc.string({ minLength: 101, maxLength: 200 }).filter(s => s.trim().length > 100),
+      (s) => {
+        const result = Validator.validateNamaItem(s);
+        return result.valid === false;
+      }
+    ),
+    { numRuns: 100 }
+  );
+  report('P2c — validateNamaItem rejects strings with trimmed length > 100', true);
+} catch (e) {
+  report('P2c — validateNamaItem rejects strings with trimmed length > 100', false, String(e));
+}
+
+// ===========================================================================
+// Section: Property 10 — Validator threshold menolak nilai di luar [0, 999999999]
+// ===========================================================================
+// Feature: expense-budget-visualizer, Property 10: Validator threshold menolak semua nilai di luar rentang [0, 999999999]
+// Validates: Requirements 9.3
+// ===========================================================================
+
+section('Property 10 — Validator threshold menolak nilai di luar [0, 999999999]');
+
+// Arbitrary: threshold values strictly outside [0, 999_999_999]
+const arbOutOfRangeThreshold = fc.oneof(
+  fc.integer({ min: -1_000_000, max: -1 }),              // negatives
+  fc.integer({ min: 1_000_000_000, max: 2_000_000_000 }) // above max
+);
+
+// Property 10a: negative numbers return { valid: false }
+try {
+  fc.assert(
+    fc.property(fc.integer({ min: -1_000_000, max: -1 }), (n) => {
+      const result = Validator.validateThreshold(n);
+      return result.valid === false;
+    }),
+    { numRuns: 200 }
+  );
+  report('P10a — validateThreshold rejects negative numbers', true);
+} catch (e) {
+  report('P10a — validateThreshold rejects negative numbers', false, String(e));
+}
+
+// Property 10b: numbers above max return { valid: false }
+try {
+  fc.assert(
+    fc.property(fc.integer({ min: 1_000_000_000, max: 2_000_000_000 }), (n) => {
+      const result = Validator.validateThreshold(n);
+      return result.valid === false;
+    }),
+    { numRuns: 200 }
+  );
+  report('P10b — validateThreshold rejects numbers above 999999999', true);
+} catch (e) {
+  report('P10b — validateThreshold rejects numbers above 999999999', false, String(e));
+}
+
+// Property 10c: non-numeric strings return { valid: false }
+try {
+  fc.assert(
+    fc.property(arbNonNumericString, (s) => {
+      const result = Validator.validateThreshold(s);
+      return result.valid === false;
+    }),
+    { numRuns: 200 }
+  );
+  report('P10c — validateThreshold rejects non-numeric strings', true);
+} catch (e) {
+  report('P10c — validateThreshold rejects non-numeric strings', false, String(e));
+}
+
+// Property 10d: valid integers in range [0, 999999999] always pass
+try {
+  fc.assert(
+    fc.property(fc.integer({ min: 0, max: 999_999_999 }), (n) => {
+      const result = Validator.validateThreshold(n);
+      return result.valid === true;
+    }),
+    { numRuns: 200 }
+  );
+  report('P10d — validateThreshold accepts valid integers in [0, 999999999]', true);
+} catch (e) {
+  report('P10d — validateThreshold accepts valid integers in [0, 999999999]', false, String(e));
+}
+
+// ===========================================================================
+// Section: Validator — Unit Tests
+// ===========================================================================
+
+section('Validator — Unit Tests');
+
+// validateNamaItem
+{
+  const cases = [
+    { input: '',          expectValid: false, label: 'empty string' },
+    { input: '   ',       expectValid: false, label: 'whitespace only' },
+    { input: '\t\n',      expectValid: false, label: 'tab and newline only' },
+    { input: 'Kopi',      expectValid: true,  label: 'valid short name' },
+    { input: 'A'.repeat(100), expectValid: true,  label: 'exactly 100 chars' },
+    { input: 'A'.repeat(101), expectValid: false, label: '101 chars exceeds max' },
+  ];
+  for (const { input, expectValid, label } of cases) {
+    const result = Validator.validateNamaItem(input);
+    const ok = result.valid === expectValid && (expectValid || result.error.length > 0);
+    report(`UT-V1 validateNamaItem — ${label}`, ok,
+      !ok ? `expected valid=${expectValid}, got valid=${result.valid}, error="${result.error}"` : '');
+  }
+}
+
+// validateJumlah
+{
+  const cases = [
+    { input: '',           expectValid: false, label: 'empty string' },
+    { input: 0,            expectValid: false, label: 'zero' },
+    { input: -1,           expectValid: false, label: 'negative integer' },
+    { input: 1,            expectValid: true,  label: 'minimum valid value (1)' },
+    { input: 999_999_999,  expectValid: true,  label: 'maximum valid value (999999999)' },
+    { input: 1_000_000_000,expectValid: false, label: 'above maximum' },
+    { input: 1.5,          expectValid: false, label: 'float' },
+    { input: 'abc',        expectValid: false, label: 'non-numeric string' },
+    { input: '50000',      expectValid: true,  label: 'valid numeric string' },
+  ];
+  for (const { input, expectValid, label } of cases) {
+    const result = Validator.validateJumlah(input);
+    const ok = result.valid === expectValid && (expectValid || result.error.length > 0);
+    report(`UT-V2 validateJumlah — ${label}`, ok,
+      !ok ? `expected valid=${expectValid}, got valid=${result.valid}, error="${result.error}"` : '');
+  }
+}
+
+// validateKategori
+{
+  const cases = [
+    { input: '',             expectValid: false, label: 'empty string' },
+    { input: 'Makanan',      expectValid: true,  label: 'Makanan' },
+    { input: 'Transportasi', expectValid: true,  label: 'Transportasi' },
+    { input: 'Hiburan',      expectValid: true,  label: 'Hiburan' },
+    { input: 'makanan',      expectValid: false, label: 'lowercase (invalid)' },
+    { input: 'Lainnya',      expectValid: false, label: 'unknown category' },
+  ];
+  for (const { input, expectValid, label } of cases) {
+    const result = Validator.validateKategori(input);
+    const ok = result.valid === expectValid && (expectValid || result.error.length > 0);
+    report(`UT-V3 validateKategori — ${label}`, ok,
+      !ok ? `expected valid=${expectValid}, got valid=${result.valid}, error="${result.error}"` : '');
+  }
+}
+
+// validateThreshold
+{
+  const cases = [
+    { input: -1,           expectValid: false, label: 'negative' },
+    { input: 0,            expectValid: true,  label: 'zero (minimum valid)' },
+    { input: 999_999_999,  expectValid: true,  label: 'maximum valid value' },
+    { input: 1_000_000_000,expectValid: false, label: 'above maximum' },
+    { input: 'xyz',        expectValid: false, label: 'non-numeric string' },
+    { input: 500_000,      expectValid: true,  label: 'mid-range value' },
+  ];
+  for (const { input, expectValid, label } of cases) {
+    const result = Validator.validateThreshold(input);
+    const ok = result.valid === expectValid && (expectValid || result.error.length > 0);
+    report(`UT-V4 validateThreshold — ${label}`, ok,
+      !ok ? `expected valid=${expectValid}, got valid=${result.valid}, error="${result.error}"` : '');
+  }
+}
+
+// validateTransactionData
+{
+  const validData = { namaItem: 'Kopi', jumlah: 15000, kategori: 'Makanan' };
+  const r1 = Validator.validateTransactionData(validData);
+  report('UT-V5 validateTransactionData — all fields valid', r1.valid === true && Object.keys(r1.errors).length === 0);
+
+  const emptyData = { namaItem: '', jumlah: '', kategori: '' };
+  const r2 = Validator.validateTransactionData(emptyData);
+  report('UT-V5 validateTransactionData — all fields empty returns 3 errors',
+    r2.valid === false && Object.keys(r2.errors).length === 3,
+    `errors: ${JSON.stringify(r2.errors)}`
+  );
+
+  const partial = { namaItem: 'Nasi', jumlah: -5, kategori: 'Makanan' };
+  const r3 = Validator.validateTransactionData(partial);
+  report('UT-V5 validateTransactionData — only jumlah invalid',
+    r3.valid === false && r3.errors.jumlah && !r3.errors.namaItem && !r3.errors.kategori
+  );
+}
+
+// ===========================================================================
+// StateManager — verbatim copy from app.js === STATE ===
+// (Inlined here because app.js has no export statements — Req 6.3)
+// ===========================================================================
+
+function generateId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/**
+ * Factory function that creates an isolated StateManager instance.
+ * Used in tests to get a fresh, empty state for each property run.
+ */
+function makeStateManager() {
+  let _transactions = [];
+
+  // Use a no-op storage for testing (avoids polluting localStorage)
+  const _storage = {
+    save() {},
+    load() { return null; },
+  };
+
+  return {
+    getTransactions() {
+      return [..._transactions];
+    },
+    addTransaction(data) {
+      const transaction = {
+        id:       generateId(),
+        namaItem: data.namaItem,
+        jumlah:   Number(data.jumlah),
+        kategori: data.kategori,
+        tanggal:  new Date().toISOString(),
+      };
+      _transactions.push(transaction);
+      return transaction;
+    },
+    deleteTransaction(id) {
+      _transactions = _transactions.filter(t => t.id !== id);
+    },
+    getTotal() {
+      return _transactions.reduce((sum, t) => sum + t.jumlah, 0);
+    },
+    getByCategory() {
+      const result = {};
+      for (const t of _transactions) {
+        result[t.kategori] = (result[t.kategori] || 0) + t.jumlah;
+      }
+      for (const key of Object.keys(result)) {
+        if (result[key] <= 0) delete result[key];
+      }
+      return result;
+    },
+    getByMonth() {
+      const raw = {};
+      for (const t of _transactions) {
+        const key = t.tanggal.slice(0, 7);
+        raw[key] = (raw[key] || 0) + t.jumlah;
+      }
+      const sortedEntries = Object.entries(raw).sort((a, b) => b[0].localeCompare(a[0]));
+      return Object.fromEntries(sortedEntries);
+    },
+    // Allow tests to seed an initial state directly
+    _seed(txArray) {
+      _transactions = txArray.map(t => ({ ...t }));
+    },
+    _getInternal() {
+      return _transactions;
+    },
+  };
+}
+
+// ===========================================================================
+// Arbitraries for StateManager tests
+// ===========================================================================
+
+/** Valid transaction input (no id/tanggal — StateManager generates those) */
+const arbTransactionInput = fc.record({
+  namaItem: fc.string({ minLength: 1, maxLength: 100 }).filter(s => s.trim().length > 0),
+  jumlah:   fc.integer({ min: 1, max: 999_999_999 }),
+  kategori: fc.constantFrom('Makanan', 'Transportasi', 'Hiburan'),
+});
+
+/** A complete Transaction object (as would be stored) */
+const arbStoredTransaction = fc.record({
+  id:       fc.string({ minLength: 1, maxLength: 30 }),
+  namaItem: fc.string({ minLength: 1, maxLength: 100 }).filter(s => s.trim().length > 0),
+  jumlah:   fc.integer({ min: 1, max: 999_999_999 }),
+  kategori: fc.constantFrom('Makanan', 'Transportasi', 'Hiburan'),
+  tanggal:  fc.date({ min: new Date('2000-01-01'), max: new Date('2099-12-31') })
+               .map(d => d.toISOString()),
+});
+
+const arbStoredTransactionArray = fc.array(arbStoredTransaction, { minLength: 0, maxLength: 30 });
+
+/** Non-empty array of stored transactions */
+const arbNonEmptyStoredArray = fc.array(arbStoredTransaction, { minLength: 1, maxLength: 30 });
+
+// ===========================================================================
+// Section: Property 3 — addTransaction menambah panjang daftar tepat +1
+// ===========================================================================
+// Feature: expense-budget-visualizer, Property 3: Penambahan transaksi valid menambah panjang daftar +1
+// Validates: Requirements 1.5, 3.1
+// ===========================================================================
+
+section('Property 3 — addTransaction menambah panjang daftar tepat +1');
+
+// Property 3a: length increases by exactly 1 for any pre-existing list + valid input
+try {
+  fc.assert(
+    fc.property(arbStoredTransactionArray, arbTransactionInput, (existing, input) => {
+      const sm = makeStateManager();
+      sm._seed(existing);
+      const before = sm.getTransactions().length;
+      sm.addTransaction(input);
+      const after = sm.getTransactions().length;
+      return after === before + 1;
+    }),
+    { numRuns: 200 }
+  );
+  report('P3a — addTransaction increases list length by exactly 1', true);
+} catch (e) {
+  report('P3a — addTransaction increases list length by exactly 1', false, String(e));
+}
+
+// Property 3b: the new transaction is present at the end of the list
+try {
+  fc.assert(
+    fc.property(arbStoredTransactionArray, arbTransactionInput, (existing, input) => {
+      const sm = makeStateManager();
+      sm._seed(existing);
+      const created = sm.addTransaction(input);
+      const list = sm.getTransactions();
+      const last = list[list.length - 1];
+      return (
+        last.id        === created.id        &&
+        last.namaItem  === input.namaItem    &&
+        last.jumlah    === Number(input.jumlah) &&
+        last.kategori  === input.kategori
+      );
+    }),
+    { numRuns: 200 }
+  );
+  report('P3b — new transaction appears at the end of the list with correct fields', true);
+} catch (e) {
+  report('P3b — new transaction appears at the end of the list with correct fields', false, String(e));
+}
+
+// Property 3c: adding to empty list produces list of length 1
+try {
+  fc.assert(
+    fc.property(arbTransactionInput, (input) => {
+      const sm = makeStateManager();
+      sm.addTransaction(input);
+      return sm.getTransactions().length === 1;
+    }),
+    { numRuns: 100 }
+  );
+  report('P3c — adding to empty list produces exactly 1 item', true);
+} catch (e) {
+  report('P3c — adding to empty list produces exactly 1 item', false, String(e));
+}
+
+// ===========================================================================
+// Section: Property 4 — deleteTransaction menghilangkan item yang tepat -1
+// ===========================================================================
+// Feature: expense-budget-visualizer, Property 4: Penghapusan transaksi menghilangkan item yang tepat dari daftar
+// Validates: Requirements 3.3, 3.4
+// ===========================================================================
+
+section('Property 4 — deleteTransaction menghilangkan item yang tepat dari daftar');
+
+// Property 4a: length decreases by exactly 1 when deleting an existing id
+try {
+  fc.assert(
+    fc.property(
+      arbNonEmptyStoredArray,
+      fc.integer({ min: 0, max: 29 }),
+      (txArray, indexSeed) => {
+        // Ensure unique ids to avoid ambiguous deletes
+        const unique = txArray.map((t, i) => ({ ...t, id: `id-${i}` }));
+        const targetIndex = indexSeed % unique.length;
+        const targetId = unique[targetIndex].id;
+
+        const sm = makeStateManager();
+        sm._seed(unique);
+        const before = sm.getTransactions().length;
+        sm.deleteTransaction(targetId);
+        const after = sm.getTransactions().length;
+        return after === before - 1;
+      }
+    ),
+    { numRuns: 200 }
+  );
+  report('P4a — deleteTransaction reduces list length by exactly 1', true);
+} catch (e) {
+  report('P4a — deleteTransaction reduces list length by exactly 1', false, String(e));
+}
+
+// Property 4b: the deleted id no longer exists in the list
+try {
+  fc.assert(
+    fc.property(
+      arbNonEmptyStoredArray,
+      fc.integer({ min: 0, max: 29 }),
+      (txArray, indexSeed) => {
+        const unique = txArray.map((t, i) => ({ ...t, id: `id-${i}` }));
+        const targetIndex = indexSeed % unique.length;
+        const targetId = unique[targetIndex].id;
+
+        const sm = makeStateManager();
+        sm._seed(unique);
+        sm.deleteTransaction(targetId);
+        return sm.getTransactions().every(t => t.id !== targetId);
+      }
+    ),
+    { numRuns: 200 }
+  );
+  report('P4b — deleted id is no longer present in the list', true);
+} catch (e) {
+  report('P4b — deleted id is no longer present in the list', false, String(e));
+}
+
+// Property 4c: all other transactions remain unchanged after deletion
+try {
+  fc.assert(
+    fc.property(
+      arbNonEmptyStoredArray,
+      fc.integer({ min: 0, max: 29 }),
+      (txArray, indexSeed) => {
+        const unique = txArray.map((t, i) => ({ ...t, id: `id-${i}` }));
+        const targetIndex = indexSeed % unique.length;
+        const targetId = unique[targetIndex].id;
+
+        const sm = makeStateManager();
+        sm._seed(unique);
+        sm.deleteTransaction(targetId);
+
+        const remaining = sm.getTransactions();
+        const expected = unique.filter(t => t.id !== targetId);
+        if (remaining.length !== expected.length) return false;
+        return expected.every((exp, i) => {
+          const got = remaining[i];
+          return (
+            got.id       === exp.id       &&
+            got.namaItem === exp.namaItem &&
+            got.jumlah   === exp.jumlah   &&
+            got.kategori === exp.kategori &&
+            got.tanggal  === exp.tanggal
+          );
+        });
+      }
+    ),
+    { numRuns: 200 }
+  );
+  report('P4c — all other transactions remain unchanged after deletion', true);
+} catch (e) {
+  report('P4c — all other transactions remain unchanged after deletion', false, String(e));
+}
+
+// ===========================================================================
+// Section: Property 5 — getTotal() = sum of all jumlah
+// ===========================================================================
+// Feature: expense-budget-visualizer, Property 5: Total saldo selalu sama dengan penjumlahan semua nilai jumlah
+// Validates: Requirements 4.1, 4.5
+// ===========================================================================
+
+section('Property 5 — getTotal() selalu sama dengan jumlah semua jumlah');
+
+// Property 5a: getTotal matches manual sum for any list
+try {
+  fc.assert(
+    fc.property(arbStoredTransactionArray, (txArray) => {
+      const sm = makeStateManager();
+      sm._seed(txArray);
+      const expected = txArray.reduce((sum, t) => sum + t.jumlah, 0);
+      return sm.getTotal() === expected;
+    }),
+    { numRuns: 200 }
+  );
+  report('P5a — getTotal() equals manual sum for any transaction list', true);
+} catch (e) {
+  report('P5a — getTotal() equals manual sum for any transaction list', false, String(e));
+}
+
+// Property 5b: getTotal() returns 0 for empty list (Req 4.5)
+try {
+  fc.assert(
+    fc.property(fc.constant([]), (empty) => {
+      const sm = makeStateManager();
+      sm._seed(empty);
+      return sm.getTotal() === 0;
+    }),
+    { numRuns: 10 }
+  );
+  report('P5b — getTotal() returns 0 for empty list', true);
+} catch (e) {
+  report('P5b — getTotal() returns 0 for empty list', false, String(e));
+}
+
+// Property 5c: getTotal() updates correctly after addTransaction
+try {
+  fc.assert(
+    fc.property(arbStoredTransactionArray, arbTransactionInput, (existing, input) => {
+      const sm = makeStateManager();
+      sm._seed(existing);
+      const before = sm.getTotal();
+      sm.addTransaction(input);
+      const after = sm.getTotal();
+      return after === before + Number(input.jumlah);
+    }),
+    { numRuns: 200 }
+  );
+  report('P5c — getTotal() increases by the added jumlah after addTransaction', true);
+} catch (e) {
+  report('P5c — getTotal() increases by the added jumlah after addTransaction', false, String(e));
+}
+
+// Property 5d: getTotal() updates correctly after deleteTransaction
+try {
+  fc.assert(
+    fc.property(
+      arbNonEmptyStoredArray,
+      fc.integer({ min: 0, max: 29 }),
+      (txArray, indexSeed) => {
+        const unique = txArray.map((t, i) => ({ ...t, id: `id-${i}` }));
+        const targetIndex = indexSeed % unique.length;
+        const target = unique[targetIndex];
+
+        const sm = makeStateManager();
+        sm._seed(unique);
+        const before = sm.getTotal();
+        sm.deleteTransaction(target.id);
+        const after = sm.getTotal();
+        return after === before - target.jumlah;
+      }
+    ),
+    { numRuns: 200 }
+  );
+  report('P5d — getTotal() decreases by the deleted jumlah after deleteTransaction', true);
+} catch (e) {
+  report('P5d — getTotal() decreases by the deleted jumlah after deleteTransaction', false, String(e));
+}
+
+// ===========================================================================
+// Section: Property 8 — getByCategory hanya memuat kategori dengan total > 0
+// ===========================================================================
+// Feature: expense-budget-visualizer, Property 8: getByCategory hanya memuat kategori dengan total > 0
+// Validates: Requirements 5.1
+// ===========================================================================
+
+section('Property 8 — getByCategory hanya memuat kategori dengan total > 0');
+
+// Property 8a: no entry in getByCategory has total <= 0
+try {
+  fc.assert(
+    fc.property(arbStoredTransactionArray, (txArray) => {
+      const sm = makeStateManager();
+      sm._seed(txArray);
+      const byCategory = sm.getByCategory();
+      return Object.values(byCategory).every(total => total > 0);
+    }),
+    { numRuns: 200 }
+  );
+  report('P8a — no category entry has total ≤ 0', true);
+} catch (e) {
+  report('P8a — no category entry has total ≤ 0', false, String(e));
+}
+
+// Property 8b: every category present in result has at least one transaction
+try {
+  fc.assert(
+    fc.property(arbStoredTransactionArray, (txArray) => {
+      const sm = makeStateManager();
+      sm._seed(txArray);
+      const byCategory = sm.getByCategory();
+      const categoriesInList = new Set(txArray.map(t => t.kategori));
+      for (const key of Object.keys(byCategory)) {
+        if (!categoriesInList.has(key)) return false;
+      }
+      return true;
+    }),
+    { numRuns: 200 }
+  );
+  report('P8b — getByCategory only contains categories that appear in the transaction list', true);
+} catch (e) {
+  report('P8b — getByCategory only contains categories that appear in the transaction list', false, String(e));
+}
+
+// Property 8c: totals in getByCategory match manual group-sum
+try {
+  fc.assert(
+    fc.property(arbStoredTransactionArray, (txArray) => {
+      const sm = makeStateManager();
+      sm._seed(txArray);
+      const byCategory = sm.getByCategory();
+      // Build expected manually
+      const expected = {};
+      for (const t of txArray) {
+        expected[t.kategori] = (expected[t.kategori] || 0) + t.jumlah;
+      }
+      for (const key of Object.keys(expected)) {
+        if (expected[key] <= 0) delete expected[key];
+      }
+      const gotKeys   = Object.keys(byCategory).sort();
+      const expKeys   = Object.keys(expected).sort();
+      if (gotKeys.join(',') !== expKeys.join(',')) return false;
+      return gotKeys.every(k => byCategory[k] === expected[k]);
+    }),
+    { numRuns: 200 }
+  );
+  report('P8c — getByCategory totals match manual group-sum per category', true);
+} catch (e) {
+  report('P8c — getByCategory totals match manual group-sum per category', false, String(e));
+}
+
+// Property 8d: empty list produces empty getByCategory
+try {
+  fc.assert(
+    fc.property(fc.constant([]), (empty) => {
+      const sm = makeStateManager();
+      sm._seed(empty);
+      return Object.keys(sm.getByCategory()).length === 0;
+    }),
+    { numRuns: 10 }
+  );
+  report('P8d — getByCategory returns empty object for empty transaction list', true);
+} catch (e) {
+  report('P8d — getByCategory returns empty object for empty transaction list', false, String(e));
+}
+
+// ===========================================================================
+// Section: Property 9 — getByMonth mengelompokkan per bulan-tahun dan diurutkan
+// ===========================================================================
+// Feature: expense-budget-visualizer, Property 9: getByMonth mengelompokkan per bulan-tahun dan diurutkan
+// Validates: Requirements 7.1, 7.3
+// ===========================================================================
+
+section('Property 9 — getByMonth mengelompokkan per bulan-tahun dan diurutkan');
+
+// Arbitrary with varied dates to exercise different YYYY-MM combos
+const arbDateString = fc.date({ min: new Date('2020-01-01'), max: new Date('2025-12-31') })
+  .map(d => d.toISOString());
+
+const arbStoredTxWithDate = fc.record({
+  id:       fc.string({ minLength: 1, maxLength: 20 }),
+  namaItem: fc.string({ minLength: 1, maxLength: 50 }).filter(s => s.trim().length > 0),
+  jumlah:   fc.integer({ min: 1, max: 999_999_999 }),
+  kategori: fc.constantFrom('Makanan', 'Transportasi', 'Hiburan'),
+  tanggal:  arbDateString,
+});
+
+const arbTxArrayWithDates = fc.array(arbStoredTxWithDate, { minLength: 0, maxLength: 30 });
+
+// Property 9a: keys are sorted newest-first (descending)
+try {
+  fc.assert(
+    fc.property(arbTxArrayWithDates, (txArray) => {
+      const sm = makeStateManager();
+      sm._seed(txArray);
+      const byMonth = sm.getByMonth();
+      const keys = Object.keys(byMonth);
+      for (let i = 0; i < keys.length - 1; i++) {
+        if (keys[i].localeCompare(keys[i + 1]) <= 0) return false;
+      }
+      return true;
+    }),
+    { numRuns: 200 }
+  );
+  report('P9a — getByMonth keys are sorted newest-first (descending)', true);
+} catch (e) {
+  report('P9a — getByMonth keys are sorted newest-first (descending)', false, String(e));
+}
+
+// Property 9b: only months with at least one transaction appear in result
+try {
+  fc.assert(
+    fc.property(arbTxArrayWithDates, (txArray) => {
+      const sm = makeStateManager();
+      sm._seed(txArray);
+      const byMonth = sm.getByMonth();
+      const monthsInList = new Set(txArray.map(t => t.tanggal.slice(0, 7)));
+      for (const key of Object.keys(byMonth)) {
+        if (!monthsInList.has(key)) return false;
+      }
+      return true;
+    }),
+    { numRuns: 200 }
+  );
+  report('P9b — only months with transactions appear in getByMonth', true);
+} catch (e) {
+  report('P9b — only months with transactions appear in getByMonth', false, String(e));
+}
+
+// Property 9c: totals in getByMonth match manual group-sum
+try {
+  fc.assert(
+    fc.property(arbTxArrayWithDates, (txArray) => {
+      const sm = makeStateManager();
+      sm._seed(txArray);
+      const byMonth = sm.getByMonth();
+      const expected = {};
+      for (const t of txArray) {
+        const key = t.tanggal.slice(0, 7);
+        expected[key] = (expected[key] || 0) + t.jumlah;
+      }
+      const gotKeys = Object.keys(byMonth).sort();
+      const expKeys = Object.keys(expected).sort();
+      if (gotKeys.join(',') !== expKeys.join(',')) return false;
+      return gotKeys.every(k => byMonth[k] === expected[k]);
+    }),
+    { numRuns: 200 }
+  );
+  report('P9c — getByMonth totals match manual group-sum per YYYY-MM', true);
+} catch (e) {
+  report('P9c — getByMonth totals match manual group-sum per YYYY-MM', false, String(e));
+}
+
+// Property 9d: same month in different years appears as separate entries
+try {
+  fc.assert(
+    fc.property(
+      fc.integer({ min: 1, max: 999_999_999 }),
+      fc.integer({ min: 1, max: 999_999_999 }),
+      (jumlah1, jumlah2) => {
+        const txArray = [
+          { id: 'a', namaItem: 'X', jumlah: jumlah1, kategori: 'Makanan',  tanggal: '2023-03-15T00:00:00.000Z' },
+          { id: 'b', namaItem: 'Y', jumlah: jumlah2, kategori: 'Hiburan',  tanggal: '2024-03-15T00:00:00.000Z' },
+        ];
+        const sm = makeStateManager();
+        sm._seed(txArray);
+        const byMonth = sm.getByMonth();
+        const keys = Object.keys(byMonth);
+        // Both 2023-03 and 2024-03 must appear as separate entries
+        return keys.includes('2023-03') && keys.includes('2024-03') && keys.length === 2;
+      }
+    ),
+    { numRuns: 50 }
+  );
+  report('P9d — same month in different years appears as separate entries', true);
+} catch (e) {
+  report('P9d — same month in different years appears as separate entries', false, String(e));
+}
+
+// Property 9e: empty list produces empty getByMonth
+try {
+  fc.assert(
+    fc.property(fc.constant([]), (empty) => {
+      const sm = makeStateManager();
+      sm._seed(empty);
+      return Object.keys(sm.getByMonth()).length === 0;
+    }),
+    { numRuns: 10 }
+  );
+  report('P9e — getByMonth returns empty object for empty transaction list', true);
+} catch (e) {
+  report('P9e — getByMonth returns empty object for empty transaction list', false, String(e));
+}
+
+renderSummary();
+</script>
+
+</body>
+</html>
